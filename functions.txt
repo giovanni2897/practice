@@ -8,6 +8,8 @@ import numpy as np
 import copy
 from datetime import date
 
+var_alif = 'alif ngedit file supaya conflict'
+
 # !pip install openpyxl
 import os
 import model_functions as fun
