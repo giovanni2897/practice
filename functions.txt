@@ -8,7 +8,7 @@ import numpy as np
 import copy
 from datetime import date
 
-#var_alif = 'dito ngedit file supaya conflict' just for practice
+#var_alif = 'dito ngedit file supaya conflict'
 
 # !pip install openpyxl
 import os
