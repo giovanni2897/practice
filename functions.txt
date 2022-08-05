@@ -1,0 +1,352 @@
+import pandas as pd
+pd.set_option('display.max_columns', None)
+pd.set_option('display.max_rows', None)
+import seaborn as sns
+import matplotlib.pyplot as plt
+%matplotlib inline
+import numpy as np
+import copy
+from datetime import date
+
+# !pip install openpyxl
+import os
+import model_functions as fun
+
+# !pip install -q imbalanced-learn
+import imblearn
+from imblearn.under_sampling import RandomUnderSampler
+from imblearn.over_sampling import SMOTE, SMOTENC
+
+from sklearn.preprocessing import MinMaxScaler, OneHotEncoder
+from feature_engine.encoding import CountFrequencyEncoder
+
+from sklearn.model_selection import cross_val_score, GridSearchCV, RandomizedSearchCV, train_test_split
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier, AdaBoostClassifier, StackingClassifier
+from sklearn.metrics import *
+from sklearn.utils.class_weight import compute_sample_weight
+
+# !pip install -q catboost
+import catboost
+from catboost import CatBoostClassifier
+
+# !pip install -q xgboost
+import xgboost as xgb
+
+import lightgbm as lgb
+
+from flaml import AutoML
+
+import pickle
+from sklearn.kernel_approximation import Nystroem
+
+from tqdm._tqdm_notebook import tqdm_notebook as tqdm
+tqdm.pandas()
+
+def nullity(data):
+    df=pd.DataFrame(columns=['dataFeatures','dataType','null','nullPct','unique','uniqueSample'])
+    df['dataFeatures']=data.columns
+    df['dataType']=[i for i in data.dtypes]
+    df['null']=df['dataFeatures'].apply(lambda x: sum(data[x].isna()))
+    df['nullPct']=df['null'].apply(lambda x: round((x/len(data))*100,2))
+    df['unique']=df['dataFeatures'].apply(lambda x: data[x].nunique())
+    df['uniqueSample']=df['dataFeatures'].apply(lambda x: data[x].unique())
+    print(f'Data count : {len(data):,}')
+    return df
+
+def make_bootstrap(boot,data,req='isi'):
+    ci=0.95
+    last=[]
+    n=len(data)
+    for i in tqdm(range(boot)):
+        sampling=data.sample(n, replace=True)
+        last.append(sampling.mean())
+    isi=np.sort(np.array(last))
+    level=((1-ci)/2)
+    atas=1-level
+    batas=[isi[round(level*boot)], isi[round(atas*boot)]]
+    if req=='isi':
+        return last
+    else:
+        return batas
+
+from scipy.stats import shapiro, normaltest, anderson
+def try_normal(data):
+    result = {'Anderson' : {i:j for i,j in zip(anderson(data)[2], anderson(data)[1])}, 'Shapiro': shapiro(data)[1], 
+     'K^2': normaltest(data)[1]}
+    result['Anderson']['stat'] = anderson(data)[0]
+    return result
+
+from scipy.stats import levene, bartlett
+def try_equal_var(x1, x2, x3, x4, x5, x6, x7, x8):
+    result = {'Bartlett': {'Bartlett-Stat' : bartlett(x1, x2, x3, x4, x5, x6, x7, x8)[0], 'P-Value': bartlett(x1,x2, x3, x4, x5, x6, x7, x8)[1] },
+             'Levene': {'Levene-Stat': levene(x1, x2, x3, x4, x5, x6, x7, x8)[0], 'P-Value': levene(x1,x2, x3, x4, x5, x6, x7, x8)[1]}}
+    return result
+
+def correlation_ratio(categories, measurements):
+    fcat, _=pd.factorize(categories)
+    cat_num=np.max(fcat)+1
+    y_avg_array=np.zeros(cat_num)
+    n_array=np.zeros(cat_num)
+    
+    for i in range(cat_num):
+        cat_measures=measurements[np.argwhere(fcat==i).flatten()]
+        n_array[i]=len(cat_measures)
+        y_avg_array[i]=np.average(cat_measures)
+    
+    y_total_avg=np.sum(np.multiply(y_avg_array,n_array))/np.sum(n_array)
+    numerator=np.sum(np.multiply(n_array,np.power(np.subtract(y_avg_array,y_total_avg),2)))
+    denominator=np.sum(np.power(np.subtract(measurements,y_total_avg),2))
+    
+    if numerator==0:
+        eta=0.0
+    else:
+        eta=np.sqrt(numerator/denominator)
+    return eta
+
+import scipy.stats as ss
+def cramers_v(x,y):
+    confusion_matrix=pd.crosstab(x,y)
+    chi2=ss.chi2_contingency(confusion_matrix)[0]
+    n=confusion_matrix.sum().sum()
+    phi2=chi2/n
+    r,k=confusion_matrix.shape
+    phi2corr=max(0,phi2-((k-1)*(r-1))/(n-1))
+    
+    rcorr=r-((r-1)**2)/(n-1)
+    kcorr=k-((k-1)**2)/(n-1)
+    
+    return np.sqrt(phi2corr/min((kcorr-1),(rcorr-1)))
+
+def calc_train_error(X_train, y_train, model):
+    predictions=model.predict(X_train)
+    predictProba=model.predict_proba(X_train)
+    
+    matt=matthews_corrcoef(y_train, predictions)
+    f1=f1_score(y_train, predictions, average='macro')
+    report=classification_report(y_train, predictions)
+    accuracy=accuracy_score(y_train, predictions)
+    confMatrix=confusion_matrix(y_train, predictions)
+    logloss=log_loss(y_train, predictProba)
+    
+    return {
+        'report' : report,
+        'matthew' : matt,
+        'f1' : f1,
+        'accuracy' : accuracy,
+        'confusion' : confMatrix,
+        'logloss' : logloss
+    }
+
+def calc_validation_error(X_test, y_test, model):
+    predictions=model.predict(X_test)
+    predictProba=model.predict_proba(X_test)
+    
+    matt=matthews_corrcoef(y_test, predictions)
+    f1=f1_score(y_test, predictions, average='macro')
+    report=classification_report(y_test, predictions)
+    accuracy=accuracy_score(y_test, predictions)
+    confMatrix=confusion_matrix(y_test, predictions)
+    logloss=log_loss(y_test, predictProba)
+    
+    return {
+        'report' : report,
+        'matthew' : matt,
+        'f1' : f1,
+        'accuracy' : accuracy,
+        'confusion' : confMatrix,
+        'logloss' : logloss
+    }
+
+def calc_metrics(X_train, y_train, X_test, y_test, model):
+    model.fit(X_train, y_train)
+    
+    train_error=calc_train_error(X_train, y_train, model)
+    validation_error=calc_validation_error(X_test, y_test, model)
+    
+    return train_error, validation_error
+
+def fill_nan_str(x):
+    word = str(x)
+    word = word.lower()
+    
+    if word == 'nan':
+        return word.replace('nan', 'others').lower()
+    else:
+        return word
+    
+def low(x):
+    word = str(x)
+    word = word.lower()
+    return word
+
+def evalTradeOff(x_xdf,x_ydf, xmodel):
+    probs = np.arange(0,1.01,0.05)
+    container = []
+    for prob in probs:
+        tmp_test_PDF = copy.deepcopy(x_xdf)
+        tmp_test_PDF['y_label'] = x_ydf
+        tmp_test_PDF['prob'] = xmodel.predict_proba(x_xdf)[:,1]
+        tp = tmp_test_PDF.loc[(tmp_test_PDF['prob']>=prob) & (tmp_test_PDF['y_label']==1)].shape[0]
+        fn = tmp_test_PDF.loc[(tmp_test_PDF['y_label']==1)].shape[0] - tp
+        tn = tmp_test_PDF.loc[(tmp_test_PDF['prob']< prob) & (tmp_test_PDF['y_label']==0)].shape[0]
+        fp = tmp_test_PDF.loc[(tmp_test_PDF['y_label']==0)].shape[0] - tn
+        recall = tp/(tp+fn)
+        lossopp = 1 - tn/(tn+fp)
+        container.append((prob,tp,fn,tn,fp,recall,lossopp))
+    eval_PDF = pd.DataFrame(container,columns=['prob','tp','fn','tn','fp','recall','lossopp'])
+    return eval_PDF
+
+def evalPropDist(x_xdf, x_ydf, xmodel):
+    tmp_xtrain_PDF = copy.deepcopy(x_train)
+    tmp_xtrain_PDF['y_label'] = y_train
+    tmp_xtrain_PDF['prob'] = xmodel.predict_proba(x_train)[:,1]
+    tmp_xtrain_PDF['RR'] = pd.qcut(tmp_xtrain_PDF['prob'],np.arange(0,1.01,0.05),duplicates='drop')
+    tmp_smy_PDF = fun.GB(tmp_xtrain_PDF, ['RR'], {'y_label':['size','sum']})
+    tmp_smy_PDF.columns = ['RR','size','y_label']
+    tmp_smy_PDF['non_y_label'] = tmp_smy_PDF['size'] - tmp_smy_PDF['y_label']
+    tmp_smy_PDF['y_rate'] = 100 * tmp_smy_PDF['y_label'] / tmp_smy_PDF['size']
+    return tmp_smy_PDF
+
+def evalPropDist_v3(x_xdf, x_ydf, xmodel):
+    tmp_xtrain_PDF = copy.deepcopy(x_xdf)
+    tmp_xtrain_PDF['y_label'] = x_ydf
+    tmp_xtrain_PDF['prob'] = xmodel.predict_proba(x_xdf)[:,1]
+    tmp_xtrain_PDF['RR'] = pd.qcut(tmp_xtrain_PDF['prob'],np.arange(0,1.01,0.05),duplicates='drop')
+    tmp_smy_PDF = fun.GB(tmp_xtrain_PDF, ['RR'], {'y_label':['size','sum']})
+    tmp_smy_PDF.columns = ['RR','size','y_label']
+    tmp_smy_PDF['non_y_label'] = tmp_smy_PDF['size'] - tmp_smy_PDF['y_label']
+    tmp_smy_PDF['y_rate'] = 100 * tmp_smy_PDF['y_label'] / tmp_smy_PDF['size']
+    return tmp_smy_PDF
+
+def evalPropDist_v2(x_xdf, x_ydf, xmodel):
+    tmp_xtrain_PDF = copy.deepcopy(x_train)
+    tmp_xtrain_PDF['y_label'] = y_train
+    tmp_xtrain_PDF['prob'] = xmodel.predict_proba(x_train)[:,1]
+    tmp_xtrain_PDF['RR'] = pd.qcut(tmp_xtrain_PDF['prob'],np.arange(0,1.01,0.05),duplicates='drop')
+    tmp_smy_PDF = fun.GB(tmp_xtrain_PDF, ['RR'], {'y_label':['size','sum'],'prob':['mean']})
+    tmp_smy_PDF.columns = ['RR','size','y_label','avgprob']
+    tmp_smy_PDF['non_y_label'] = tmp_smy_PDF['size'] - tmp_smy_PDF['y_label']
+    tmp_smy_PDF['y_rate'] = 100 * tmp_smy_PDF['y_label'] / tmp_smy_PDF['size']
+    return tmp_smy_PDF, tmp_xtrain_PDF
+
+def overfitCheck_RR(xtrain, xtest, ytrain, ytest, model):
+    tmp_xtrain_PDF = copy.deepcopy(xtrain)
+    tmp_xtrain_PDF['y_label'] = ytrain
+    tmp_xtrain_PDF['prob'] = model.predict_proba(xtrain)[:,1]
+    ser, bins = pd.qcut(tmp_xtrain_PDF["prob"], retbins = True, q = np.arange(0,1.01,0.05), duplicates='drop')
+    tmp_xtrain_PDF['Index'] = pd.cut(tmp_xtrain_PDF["prob"], bins = bins, labels = False, include_lowest = True)
+    tmp_xtrain_PDF['RR'] = ser
+    RR_Train = fun.GB(tmp_xtrain_PDF, ['RR'], {'y_label':['size','sum']})
+    RR_Train.columns = ['RR','size','y_label']
+    RR_Train['non_y_label'] = RR_Train['size'] - RR_Train['y_label']
+    RR_Train['y_rate'] = 100 * RR_Train['y_label'] / RR_Train['size']
+    a = [x for x in np.arange(0,20)]
+    RR_Train.insert(loc=0, column='Index', value=a[::-1])
+    
+    tmp_xtest_PDF = copy.deepcopy(xtest)
+    tmp_xtest_PDF['y_label'] = ytest
+    tmp_xtest_PDF['prob'] = model.predict_proba(xtest)[:,1]
+    tmp_xtest_PDF['Index'] = pd.cut(tmp_xtest_PDF["prob"], bins = bins, labels = False, include_lowest = True)
+    tmp_xtest_PDF = pd.merge(tmp_xtest_PDF, RR_Train[['Index', 'RR']], how='left', on='Index')
+    RR_Test = fun.GB(tmp_xtest_PDF, ['RR'], {'y_label':['size','sum']})
+    RR_Test.columns = ['RR','size','y_label']
+    RR_Test['non_y_label'] = RR_Test['size'] - RR_Test['y_label']
+    RR_Test['y_rate'] = 100 * RR_Test['y_label'] / RR_Test['size']
+    RR_Test.insert(loc=0, column='Index', value=a[::-1])
+    
+    x_data = pd.concat([xtrain, xtest], axis=0)
+    y_data = pd.concat([ytrain, ytest], axis=0)
+    
+    tmp_xAll_PDF = copy.deepcopy(x_data)
+    tmp_xAll_PDF['y_label'] = y_data
+    tmp_xAll_PDF['prob'] = model.predict_proba(x_data)[:,1]
+    tmp_xAll_PDF['Index'] = pd.cut(tmp_xAll_PDF["prob"], bins = bins, labels = False, include_lowest = True)
+    tmp_xAll_PDF = pd.merge(tmp_xAll_PDF, RR_Train[['Index', 'RR']], how='left', on='Index')
+    RR_All = fun.GB(tmp_xAll_PDF, ['RR'], {'y_label':['size','sum']})
+    RR_All.columns = ['RR','size','y_label']
+    RR_All['non_y_label'] = RR_All['size'] - RR_All['y_label']
+    RR_All['y_rate'] = 100 * RR_All['y_label'] / RR_All['size']
+    RR_All.insert(loc=0, column='Index', value=a[::-1])
+    
+    fig, ax = plt.subplots(1,figsize=(10.0,7.5), dpi=192)
+    fig.tight_layout()
+    ax.plot(RR_Train['RR'].astype('str').to_list(), RR_Train['y_rate'], label = 'Train', color = '#176ac9', linewidth = 2.0)
+    ax.plot(RR_Train['RR'].astype('str').to_list(), RR_Test['y_rate'], label = 'Test', color = '#750000', linewidth = 2.0)
+    ax.plot(RR_Train['RR'].astype('str').to_list(), RR_All['y_rate'], label = 'Complete', color = '#437512', linewidth = 2.0)
+    fig.patch.set_facecolor('#FFFFFF')
+    ax.tick_params(axis='x', which='major', labelsize=10, rotation=45)
+    ax.tick_params(axis='y', which='major', labelsize=12)
+    ax.set_facecolor('#FFFFFF')
+    plt.legend(loc = 'lower center', frameon = False, bbox_to_anchor = (0.5, -0.25), ncol = 3)
+    plt.tight_layout()
+    
+    print('Risk Rank untuk data Training: ')
+    print(RR_Train.drop('Index', axis = 1), '\n')
+    print('Risk Rank untuk data Testing: ')
+    print(RR_Test.drop('Index', axis = 1), '\n')
+    print('Risk Rank untuk data Complete: ')
+    print(RR_All.drop('Index', axis = 1), '\n')
+    
+    
+def compare_model(xtrain, xtest, ytrain, ytest, model1, xtrain_lr_KA, xtest_lr_KA, ytrain_lr_KA, ytest_lr_KA, model2):
+    x_data = pd.concat([xtrain, xtest], axis=0)
+    y_data = pd.concat([ytrain, ytest], axis=0)
+    x_data_KA = pd.concat([xtrain_lr_KA, xtest_lr_KA], axis=0)
+    y_data_KA = pd.concat([ytrain_lr_KA, ytest_lr_KA], axis=0)
+    
+    tmp_xtrain_PDF = copy.deepcopy(xtrain)
+    tmp_xtrain_PDF['y_label'] = ytrain
+    tmp_xtrain_PDF['prob'] = model1.predict_proba(xtrain)[:,1]
+    ser, bins = pd.qcut(tmp_xtrain_PDF["prob"], retbins = True, q = np.arange(0,1.01,0.05), duplicates='drop')
+    tmp_xtrain_PDF['Index'] = pd.cut(tmp_xtrain_PDF["prob"], bins = bins, labels = False, include_lowest = True)
+    tmp_xtrain_PDF['RR'] = ser
+    RR_Train = fun.GB(tmp_xtrain_PDF, ['RR'], {'y_label':['size','sum']})
+    RR_Train.columns = ['RR','size','y_label']
+    RR_Train['non_y_label'] = RR_Train['size'] - RR_Train['y_label']
+    RR_Train['y_rate'] = 100 * RR_Train['y_label'] / RR_Train['size']
+    a = [x for x in np.arange(0,20)]
+    RR_Train.insert(loc=0, column='Index', value=a[::-1])
+    
+    tmp_xAll_PDF = copy.deepcopy(x_data)
+    tmp_xAll_PDF['y_label'] = y_data
+    tmp_xAll_PDF['prob'] = model1.predict_proba(x_data)[:,1]
+    tmp_xAll_PDF['Index'] = pd.cut(tmp_xAll_PDF["prob"], bins = bins, labels = False, include_lowest = True)
+    tmp_xAll_PDF = pd.merge(tmp_xAll_PDF, RR_Train[['Index', 'RR']], how='left', on='Index')
+    RR_All = fun.GB(tmp_xAll_PDF, ['RR'], {'y_label':['size','sum']})
+    RR_All.columns = ['RR','size','y_label']
+    RR_All['non_y_label'] = RR_All['size'] - RR_All['y_label']
+    RR_All['y_rate'] = 100 * RR_All['y_label'] / RR_All['size']
+    RR_All.insert(loc=0, column='Index', value=a[::-1])
+    #==========================================
+    tmp_xAll_PDF_KA = copy.deepcopy(x_data_KA)
+    tmp_xAll_PDF_KA['y_label_KA'] = y_data_KA
+    tmp_xAll_PDF_KA['prob'] = model2.predict_proba(x_data_KA)[:,1]
+    tmp_xAll_PDF_KA['Index'] = pd.cut(tmp_xAll_PDF_KA["prob"], bins = bins, labels = False, include_lowest = True)
+    tmp_xAll_PDF_KA = pd.merge(tmp_xAll_PDF_KA, RR_Train[['Index', 'RR']], how='left', on='Index')
+    RR_All_KA = fun.GB(tmp_xAll_PDF_KA, ['RR'], {'y_label_KA':['size','sum']})
+    RR_All_KA.columns = ['RR','size_KA','y_label_KA']
+    RR_All_KA['non_y_label_KA'] = RR_All_KA['size_KA'] - RR_All_KA['y_label_KA']
+    RR_All_KA['y_rate_KA'] = 100 * RR_All_KA['y_label_KA'] / RR_All_KA['size_KA']
+    a = [x for x in np.arange(0,20)]
+    RR_All_KA.insert(loc=0, column='Index', value=a[::-1])
+    #==========================================
+    RR_All_fin = pd.merge(RR_All, RR_All_KA, how='left', on=['RR', 'Index'])
+    """
+    print('Risk Rank untuk data DIT: ')
+    print(RR_All.drop('Index', axis = 1), '\n')
+    print('Risk Rank untuk data KA: ')
+    print(RR_All_KA.drop('Index', axis = 1), '\n')
+    """
+    print('Risk Rank DIT and KA: ')
+    display(RR_All_fin)
+    #==========================================
+    fig, ax = plt.subplots(1,figsize=(10.0,7.5), dpi=192)
+    fig.tight_layout()
+    ax.plot(RR_All_fin['RR'].astype('str').to_list(), RR_All_fin['y_rate'], label = 'DIT', color = '#176ac9', linewidth = 2.0)
+    ax.plot(RR_All_fin['RR'].astype('str').to_list(), RR_All_fin['y_rate_KA'], label = 'KA', color = '#750000', linewidth = 2.0)
+    fig.patch.set_facecolor('#FFFFFF')
+    ax.tick_params(axis='x', which='major', labelsize=10, rotation=45)
+    ax.tick_params(axis='y', which='major', labelsize=12)
+    ax.set_facecolor('#FFFFFF')
+    plt.legend(loc = 'lower center', frameon = False, bbox_to_anchor = (0.5, -0.25), ncol = 3)
+    plt.tight_layout()
